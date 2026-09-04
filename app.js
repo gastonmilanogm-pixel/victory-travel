@@ -7,7 +7,7 @@ const app = express();
 const PORT = 3000;
 
 // ==========================================
-// CONFIGURACIÓN DE IA (Clave Segura)
+// CONFIGURACIÓN DE IA
 // ==========================================
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const upload = multer({ storage: multer.memoryStorage() });
@@ -24,7 +24,7 @@ db.serialize(() => {
 });
 
 // ==========================================
-// 2. RUTAS API (Backend Compartido Admin/Chofer)
+// 2. RUTAS API
 // ==========================================
 
 async function procesarIAYGuardar(file, viaje_id, res) {
@@ -76,16 +76,25 @@ app.post('/api/login-scan', (req, res) => {
   });
 });
 
-app.post('/api/register-driver', async (req, res) => {
-  const { dni, texto_licencia } = req.body;
+app.post('/api/register-driver-foto', upload.single('fotoLicencia'), async (req, res) => {
+  const { dni } = req.body;
+  if (!req.file) return res.send('❌ No hay foto de licencia.');
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent(`Extraé SOLO la fecha de vencimiento (DD/MM/YYYY) de este texto de licencia argentina. Texto: ${texto_licencia}`);
+    const prompt = `Extraé SOLO la fecha de vencimiento (formato DD/MM/YYYY) de esta licencia de conducir argentina. Devolvé únicamente la fecha.`;
+    const documentPart = { inlineData: { data: req.file.buffer.toString("base64"), mimeType: req.file.mimetype } };
+    const result = await model.generateContent([prompt, documentPart]);
     let vencimiento = result.response.text().trim();
+    
     db.run(`INSERT INTO choferes (dni, nombre, vencimiento_licencia) VALUES (?, ?, ?)`, [dni, "Chofer " + dni, vencimiento], () => {
-      res.json({ success: true, dni: dni }); 
+      db.get(`SELECT id FROM viajes WHERE chofer_dni = '0' AND estado = 'PENDIENTE' LIMIT 1`, [], (err, viaje) => {
+        // Redirige directamente al primer viaje disponible o al panel
+        res.redirect('/');
+      });
     });
-  } catch (error) { res.json({ success: false, error: 'Error al leer la licencia.' }); }
+  } catch (error) { 
+    res.send('❌ Error al leer la licencia con IA.'); 
+  }
 });
 
 app.post('/api/asignar-interno', (req, res) => {
@@ -133,19 +142,11 @@ app.post('/api/subir-planilla/:viaje_id', upload.single('archivoPlanilla'), asyn
   }
 });
 
-app.post('/api/carga-manual/:viaje_id', (req, res) => {
-  const { nombre, dni, butaca, parada } = req.body;
-  db.run(`INSERT INTO hoja_ruta (viaje_id, dni_boleto, nombre_pasajero, butaca, parada_subida) VALUES (?, ?, ?, ?, ?)`, 
-    [req.params.viaje_id, dni || 'S/N', nombre, butaca || '0', parada || 'Terminal'], 
-    () => res.redirect('/admin/viaje/' + req.params.viaje_id)
-  );
-});
-
 // ==========================================
 // 3. FRONTEND - LOGIN DEL CHOFER
 // ==========================================
 app.get('/', (req, res) => {
-  res.send(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login Chofer</title><script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script><style>body { background: #0b2942; color: white; font-family: Arial; text-align: center; padding: 40px 20px; margin: 0; } .login-box { background: #123c5e; padding: 30px 20px; border-radius: 15px; border: 1px solid #1f6fb2; max-width: 400px; margin: 40px auto; box-shadow: 0px 5px 15px rgba(0,0,0,0.5); } h1 { color: #ffc107; font-size: 32px; } .btn { padding: 15px 30px; border-radius: 12px; font-size: 18px; font-weight: bold; border: none; cursor: pointer; color: white; width:100%; margin-top: 15px;} .btn-escaner { background: #ffc107; color: #0b2942; box-shadow: 0 6px 0 #b38600; } .btn-verde { background: #28a745; box-shadow: 0 6px 0 #1a6f2d; } input { padding: 15px; width: 100%; box-sizing: border-box; border-radius: 8px; border: none; font-size: 18px; text-align: center; margin-bottom: 10px; } #reader-container { width: 100%; max-width: 350px; margin: 20px auto; display: none; border-radius: 10px; border: 3px solid #ffc107; overflow: hidden; }</style></head><body><h1>🚍 Hoja de Ruta</h1><div class="login-box"><div id="step-1"><p>Identificate escaneando tu DNI.</p><button class="btn btn-escaner" onclick="iniciarEscaner('dni')">📷 Escanear mi DNI</button></div><div id="step-2" style="display: none;"><h3>¡Chofer Nuevo!</h3><p>Escaneá tu Licencia.</p><button class="btn btn-verde" onclick="iniciarEscaner('licencia')">🪪 Escanear Licencia</button></div><div id="reader-container"></div><div id="step-3" style="display: none;"><h3>🚌 Selección de Unidad</h3><p>Ingresá el número de interno:</p><input type="text" id="input-interno" placeholder="Ej: 101"><button class="btn btn-verde" onclick="asignarInterno()">Empezar Viaje ➔</button></div></div><script>let dniGuardado = ''; let html5QrCode; function iniciarEscaner(tipo) { document.getElementById('step-1').style.display='none'; document.getElementById('step-2').style.display='none'; document.getElementById('reader-container').style.display='block'; if (!html5QrCode) html5QrCode = new Html5Qrcode("reader-container"); html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 250, height: 100 } }, (texto) => { html5QrCode.stop(); document.getElementById('reader-container').style.display='none'; if (tipo === 'dni') fetch('/api/login-scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ texto_escaneado: texto }) }).then(res=>res.json()).then(data=>{ if(data.success) { dniGuardado=data.dni; if(data.require_license) document.getElementById('step-2').style.display='block'; else mostrarPasoInterno(); } else alert(data.error); }); else fetch('/api/register-driver', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ dni: dniGuardado, texto_licencia: texto }) }).then(res=>res.json()).then(data=>{ if(data.success) mostrarPasoInterno(); }); }); } function mostrarPasoInterno() { document.getElementById('caja-principal').innerHTML=document.getElementById('step-3').outerHTML; document.getElementById('step-3').style.display='block'; } function asignarInterno() { const interno = document.getElementById('input-interno').value; fetch('/api/asignar-interno', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ dni: dniGuardado, interno: interno }) }).then(res=>res.json()).then(data => { if(data.success) window.location.href = '/viaje/' + data.viaje_id; else alert(data.error); }); }</script></body></html>`);
+  res.send(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login Chofer</title><script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script><style>body { background: #0b2942; color: white; font-family: Arial; text-align: center; padding: 40px 20px; margin: 0; } .login-box { background: #123c5e; padding: 30px 20px; border-radius: 15px; border: 1px solid #1f6fb2; max-width: 400px; margin: 40px auto; box-shadow: 0px 5px 15px rgba(0,0,0,0.5); } h1 { color: #ffc107; font-size: 32px; } .btn { padding: 15px 30px; border-radius: 12px; font-size: 18px; font-weight: bold; border: none; cursor: pointer; color: white; width:100%; margin-top: 15px;} .btn-escaner { background: #ffc107; color: #0b2942; box-shadow: 0 6px 0 #b38600; } .btn-verde { background: #28a745; box-shadow: 0 6px 0 #1a6f2d; } input { padding: 15px; width: 100%; box-sizing: border-box; border-radius: 8px; border: none; font-size: 18px; text-align: center; margin-bottom: 10px; } #reader-container { width: 100%; max-width: 350px; margin: 20px auto; display: none; border-radius: 10px; border: 3px solid #ffc107; overflow: hidden; }</style></head><body id="caja-principal"><h1>🚍 Hoja de Ruta</h1><div class="login-box"><div id="step-1"><p>Identificate escaneando tu DNI.</p><button class="btn btn-escaner" onclick="iniciarEscaner()">📷 Escanear mi DNI</button></div><div id="reader-container"></div><div id="step-2" style="display: none;"><h3>¡Chofer Nuevo!</h3><p>Sacale una foto a tu Licencia de Conducir:</p><form action="/api/register-driver-foto" method="POST" enctype="multipart/form-data"><input type="hidden" name="dni" id="hidden-dni"><input type="file" name="fotoLicencia" accept="image/*" required style="margin:15px 0; color:white;"><button type="submit" class="btn btn-verde">Enviar Licencia 🧠</button></form></div><div id="step-3" style="display: none;"><h3>🚌 Selección de Unidad</h3><p>Ingresá el número de interno:</p><input type="text" id="input-interno" placeholder="Ej: 101"><button class="btn btn-verde" onclick="asignarInterno()">Empezar Viaje ➔</button></div></div><script>let dniGuardado = ''; let html5QrCode; function iniciarEscaner() { document.getElementById('step-1').style.display='none'; document.getElementById('reader-container').style.display='block'; if (!html5QrCode) html5QrCode = new Html5Qrcode("reader-container"); html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 250, height: 100 } }, (texto) => { html5QrCode.stop(); document.getElementById('reader-container').style.display='none'; let dni = texto.includes('@') ? (texto.split('@')[4] || texto.split('@')[1]) : texto; if (!dni) { alert('No se pudo leer el DNI'); window.location.reload(); return; } dniGuardado = dni; fetch('/api/login-scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ texto_escaneado: texto }) }).then(res=>res.json()).then(data=>{ if(data.success) { if(data.require_license) { document.getElementById('hidden-dni').value = dniGuardado; document.getElementById('step-2').style.display='block'; } else { mostrarPasoInterno(); } } else { alert(data.error); } }); }); } function mostrarPasoInterno() { document.getElementById('step-3').style.display='block'; } function asignarInterno() { const interno = document.getElementById('input-interno').value; fetch('/api/asignar-interno', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ dni: dniGuardado, interno: interno }) }).then(res=>res.json()).then(data => { if(data.success) window.location.href = '/viaje/' + data.viaje_id; else alert(data.error); }); }</script></body></html>`);
 });
 
 // ==========================================
